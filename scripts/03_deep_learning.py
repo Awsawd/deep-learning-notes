@@ -10,6 +10,11 @@ import joblib
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# False=80/20 调参 + 早停；True=100% 数据训练，用于最终 submission
+FULL_TRAIN = False
+FULL_TRAIN_EPOCHS = 123  # 调参模式下早停 epoch，全量训练前按实际结果修改
+VAL_PATIENCE = 25
+MAX_TUNING_EPOCHS = 150
 NUMERIC_FEATURES = [
     'Year built',
     'Bathrooms',
@@ -110,12 +115,21 @@ df = engineer_features(data[raw_cols + [TARGET]])
 X = df[feature_cols]
 y = df[TARGET]
 
-X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+if FULL_TRAIN:
+    print(f"Mode: full train ({len(X)} samples, {FULL_TRAIN_EPOCHS} epochs)")
+    X_train_data = X
+    y_train_data = y
+else:
+    print("Mode: tuning (80/20 split + early stopping)")
+    X_train_data, X_val, y_train_data, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
 
-preprocess_stats = fit_preprocess_stats(X_train)
+preprocess_stats = fit_preprocess_stats(X_train_data)
 scaler = StandardScaler()
-X_train_scaled = to_model_matrix(X_train, preprocess_stats, scaler, fit_scaler=True)
-X_val_scaled = to_model_matrix(X_val, preprocess_stats, scaler)
+X_train_scaled = to_model_matrix(X_train_data, preprocess_stats, scaler, fit_scaler=True)
+if not FULL_TRAIN:
+    X_val_scaled = to_model_matrix(X_val, preprocess_stats, scaler)
 
 input_size = X_train_scaled.shape[1]
 print(f"Input size: {input_size}")
@@ -123,10 +137,11 @@ print(f"Input size: {input_size}")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-y_train_log = np.log1p(y_train.values)
+y_train_log = np.log1p(y_train_data.values)
 X_train_t = torch.tensor(X_train_scaled, dtype=torch.float32)
 y_train_t = torch.tensor(y_train_log, dtype=torch.float32).reshape(-1, 1)
-X_val_t = torch.tensor(X_val_scaled, dtype=torch.float32)
+if not FULL_TRAIN:
+    X_val_t = torch.tensor(X_val_scaled, dtype=torch.float32)
 
 batch_size = 256
 train_loader = DataLoader(
@@ -158,11 +173,11 @@ criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 best_val_mae = float('inf')
-patience = 25
 patience_counter = 0
 best_model_state = None
+max_epochs = FULL_TRAIN_EPOCHS if FULL_TRAIN else MAX_TUNING_EPOCHS
 
-for epoch in range(150):
+for epoch in range(max_epochs):
     epoch_loss = 0.0
     model.train()
     for X_batch, y_batch in train_loader:
@@ -179,7 +194,13 @@ for epoch in range(150):
 
     if (epoch + 1) % 10 == 0:
         avg_loss = epoch_loss / len(train_loader)
-        print(f"Epoch {epoch + 1}, Loss (log space): {avg_loss:.4f}")
+        if FULL_TRAIN:
+            print(f"Epoch {epoch + 1}/{max_epochs}, Loss (log space): {avg_loss:.4f}")
+        else:
+            print(f"Epoch {epoch + 1}, Loss (log space): {avg_loss:.4f}")
+
+    if FULL_TRAIN:
+        continue
 
     model.eval()
     with torch.no_grad():
@@ -194,21 +215,28 @@ for epoch in range(150):
         best_model_state = model.state_dict()
     else:
         patience_counter += 1
-        if patience_counter >= patience:
+        if patience_counter >= VAL_PATIENCE:
             print(f"Early stopping triggered at epoch {epoch + 1}")
             break
 
+if FULL_TRAIN:
+    best_model_state = model.state_dict()
+    print(f"Full train finished ({max_epochs} epochs)")
+else:
+    model.load_state_dict(best_model_state)
+    model.eval()
+    with torch.no_grad():
+        y_val_pred_log = model(X_val_t.to(device))
+        y_pred = np.expm1(y_val_pred_log.cpu().numpy().flatten())
+        y_true = y_val.values.flatten()
+
+    mae = np.mean(np.abs(y_true - y_pred))
+    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+    print(f"Validation MAE:  ${mae:,.0f}")
+    print(f"Validation RMSE: ${rmse:,.0f}")
+
 model.load_state_dict(best_model_state)
 model.eval()
-with torch.no_grad():
-    y_val_pred_log = model(X_val_t.to(device))
-    y_pred = np.expm1(y_val_pred_log.cpu().numpy().flatten())
-    y_true = y_val.values.flatten()
-
-mae = np.mean(np.abs(y_true - y_pred))
-rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-print(f"Validation MAE:  ${mae:,.0f}")
-print(f"Validation RMSE: ${rmse:,.0f}")
 
 outputs_dir = PROJECT_ROOT / 'outputs'
 outputs_dir.mkdir(exist_ok=True)
@@ -220,6 +248,7 @@ joblib.dump({
     'raw_cols': raw_cols,
     'feature_cols': feature_cols,
 }, outputs_dir / 'preprocess.joblib')
+print(f"Saved model and preprocess artifacts to {outputs_dir}")
 
 
 # 预测 test.csv
@@ -229,7 +258,6 @@ X_test = engineer_features(test_data[raw_cols])
 X_test_scaled = to_model_matrix(X_test, preprocess_stats, scaler)
 X_test_t = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
 
-model.eval()
 with torch.no_grad():
     y_test_pred_log = model(X_test_t)
     y_test_pred = np.expm1(y_test_pred_log.cpu().numpy().flatten())
