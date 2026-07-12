@@ -6,6 +6,7 @@ from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
+import joblib
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -157,7 +158,7 @@ criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 best_val_mae = float('inf')
-patience = 20
+patience = 25
 patience_counter = 0
 best_model_state = None
 
@@ -212,6 +213,13 @@ print(f"Validation RMSE: ${rmse:,.0f}")
 outputs_dir = PROJECT_ROOT / 'outputs'
 outputs_dir.mkdir(exist_ok=True)
 torch.save(best_model_state, outputs_dir / 'best_model.pt')
+joblib.dump({
+    'preprocess_stats': preprocess_stats,
+    'scaler': scaler,
+    'input_size': input_size,
+    'raw_cols': raw_cols,
+    'feature_cols': feature_cols,
+}, outputs_dir / 'preprocess.joblib')
 
 
 # 预测 test.csv
