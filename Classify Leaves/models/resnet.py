@@ -1,5 +1,20 @@
 import torch
 import torch.nn as nn
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from scripts import dataset_common as dc
+import sys
+
+from sklearn.model_selection import train_test_split
+
+from torchvision import transforms
+import numpy as np
+from torch.utils.data import DataLoader, Subset
+import pandas as pd
+
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
 
 class BasicBlock(nn.Module):
@@ -105,13 +120,132 @@ class ResNet18(nn.Module):
 
 
 if __name__ == "__main__":
-    # BasicBlock 自测
-    b = BasicBlock(64, 64)
-    print("same shape:", b(torch.randn(2, 64, 56, 56)).shape)
+    DO_TRAIN = True
+    NUM_EPOCHS = 10
+    PATIENCE = 5
+    BATCH_SIZE = 32
+    CKPT_PATH = PROJECT_ROOT / "outputs" / "resnet18.pth"
+    data_root = PROJECT_ROOT / "data" / "classify-leaves"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    (PROJECT_ROOT / "outputs").mkdir(parents=True, exist_ok=True)
 
-    b2 = BasicBlock(64, 128, stride=2)
-    print("downsample:", b2(torch.randn(2, 64, 56, 56)).shape)
+    val_tfm = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
 
-    # 整网自测
-    y = ResNet18(num_classes=176)(torch.randn(2, 3, 224, 224))
-    print("resnet18:", y.shape)
+    train_tfm = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+        transforms.ToTensor(),
+    ])
+
+    ds = dc.LeavesDataset(data_root / "train.csv", data_root, transform = val_tfm)
+
+    if DO_TRAIN:
+        indices = np.arange(len(ds))
+        train_idx, val_idx = train_test_split(
+            indices, test_size=0.2, random_state=42, stratify=ds.targets
+        )
+
+        train_base = dc.LeavesDataset(
+            data_root / "train.csv", data_root, transform=train_tfm, label_to_idx=ds.label_to_idx
+        )
+        val_base = dc.LeavesDataset(
+            data_root / "train.csv", data_root, transform=val_tfm, label_to_idx=ds.label_to_idx
+        )
+
+        train_loader = DataLoader(
+            Subset(train_base, train_idx), batch_size=BATCH_SIZE, shuffle=True,
+        )
+        val_loader = DataLoader(
+            Subset(val_base, val_idx), batch_size=BATCH_SIZE, shuffle=True, num_workers=4
+        )
+
+        model = ResNet18(num_classes=len(ds.label_to_idx)).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+        best_val_acc = -1.0
+        epochs_no_improve = 0
+
+        for epoch in range(NUM_EPOCHS):
+            model.train()
+            train_loss , correct , total = 0.0, 0, 0
+            for images, labels in train_loader:
+                images = images.to(device)
+                labels = labels.to(device)
+                optimizer.zero_grad()
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += labels.size(0)
+                correct += predicted.eq(labels).sum().item()
+
+            model.eval()
+            val_loss , correct , total = 0.0, 0, 0
+            with torch.no_grad():
+                for images, labels in val_loader:
+                    images = images.to(device)
+                    labels = labels.to(device)
+                    pred = model(images).argmax(1)
+                    correct += pred.eq(labels).sum().item()
+                    total += labels.size(0)
+            val_acc = correct / total
+            
+            print(
+                f"Epoch {epoch+1}, "
+                f"train loss: {train_loss/len(train_loader):.4f}, "
+                f"val acc: {val_acc:.4f}"
+            )
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                epochs_no_improve = 0
+                torch.save(
+                    {
+                        "model": model.state_dict(),
+                        "label_to_idx": ds.label_to_idx,
+                        "num_classes": len(ds.label_to_idx),
+                        "best_val_acc": best_val_acc,
+                        "best_epoch": epoch + 1,
+                    },
+                    CKPT_PATH,
+                )
+                print("  ↑ saved best")
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= PATIENCE:
+                    print(f"early stop (best {best_val_acc:.4f})")
+                    break
+
+        ckpt = torch.load(CKPT_PATH, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        print(f"loaded best epoch {ckpt['best_epoch']}")
+    else:
+        ckpt = torch.load(CKPT_PATH, map_location=device, weights_only=False)
+        model = ResNet18(num_classes=ckpt["num_classes"]).to(device)
+        model.load_state_dict(ckpt["model"])
+        ds.label_to_idx = ckpt["label_to_idx"]
+
+     # ----- test + submission -----
+    idx_to_label = {i: n for n, i in ds.label_to_idx.items()}
+    test_loader = DataLoader(
+        dc.LeavesTestDataset(data_root / "test.csv", data_root, transform=val_tfm),
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+    )
+    model.eval()
+    paths, preds = [], []
+    with torch.no_grad():
+        for imgs, ps in test_loader:
+            pred = model(imgs.to(device)).argmax(1).cpu().tolist()
+            paths.extend(ps)
+            preds.extend(idx_to_label[i] for i in pred)
+    out = PROJECT_ROOT / "outputs" / "submission_resnet.csv"
+    pd.DataFrame({"image": paths, "label": preds}).to_csv(out, index=False)
+    print("wrote", out)
