@@ -2,26 +2,25 @@
 微博评论采集（Playwright + Cookie）
 
 用法:
-  # 无 Cookie 时生成演示数据（含时间戳，便于后续趋势图）
-  python scripts/01_crawl_weibo.py --demo
-
   # 真实采集：先在 .env 填 WEIBO_COOKIE，再指定博文页
   python scripts/01_crawl_weibo.py --status-url "https://weibo.com/..." --max-comments 500
 
 说明:
-  - 微博前端/接口常变，本脚本优先拦截 ajax 评论接口 JSON；失败则尝试 DOM 文本兜底。
-  - Cookie 过期时会提示重新导出；请控制频率，仅用于个人学习。
+  - 主路径：调用 buildComments 接口并用 max_id 翻页。
+  - Cookie 过期时需重新导出；请控制频率，仅用于个人学习。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import random
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
+
+# import random
+# from datetime import timedelta
 
 from dotenv import load_dotenv
 
@@ -67,204 +66,270 @@ def append_jsonl(path: Path, rows: list[dict]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def write_demo(n: int = 1200) -> Path:
-    """生成带时间分布的样例评论，便于无 Cookie 时跑通后续流水线。"""
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    out = RAW_DIR / "comments_demo.jsonl"
-    pos = [
-        "支持！讲得很有道理",
-        "太棒了，期待后续",
-        "这个观点我赞同",
-        "学到了，谢谢分享",
-        "正能量满满",
-        "分析很到位",
-        "内容质量高",
-        "值得一看再看",
-    ]
-    neu = [
-        "围观一下",
-        "先马后看",
-        "了解了",
-        "有人知道后续吗",
-        "标记一下",
-        "路过留名",
-        "收到通知了",
-        "看看大家怎么说",
-    ]
-    neg = [
-        "不认同这个说法",
-        "太离谱了吧",
-        "看完很失望",
-        "逻辑不通啊",
-        "纯属扯淡",
-        "浪费时间",
-        "完全没法同意",
-        "越看越无语",
-    ]
-    suffixes = [
-        "，说说我的看法",
-        "，仅代表个人",
-        "，希望官方回应",
-        "，相关话题讨论很多",
-        "，晚上再仔细看",
-        "，转给朋友了",
-        "，评论区好热闹",
-        "，先记录一下观点",
-    ]
-    topics = ["科技", "教育", "就业", "消费", "城市", "出行", "健康", "娱乐", "体育", "财经"]
-    pools = [pos, neu, neg]
-    base = datetime.now() - timedelta(days=14)
-    rows = []
-    for i in range(n):
-        pool = pools[i % 3]
-        text = (
-            f"{random.choice(pool)}{random.choice(suffixes)}"
-            f"。关于{random.choice(topics)}第{i}条补充：样本编号{i}。"
-        )
-        ts = base + timedelta(hours=i // 3, minutes=i % 60)
+# ---------------------------------------------------------------------------
+# 假数据 demo（已停用；需要时取消注释）
+# ---------------------------------------------------------------------------
+# def write_demo(n: int = 1200) -> Path:
+#     """生成带时间分布的样例评论，便于无 Cookie 时跑通后续流水线。"""
+#     RAW_DIR.mkdir(parents=True, exist_ok=True)
+#     out = RAW_DIR / "comments_demo.jsonl"
+#     pos = [
+#         "支持！讲得很有道理",
+#         "太棒了，期待后续",
+#         "这个观点我赞同",
+#         "学到了，谢谢分享",
+#         "正能量满满",
+#         "分析很到位",
+#         "内容质量高",
+#         "值得一看再看",
+#     ]
+#     neu = [
+#         "围观一下",
+#         "先马后看",
+#         "了解了",
+#         "有人知道后续吗",
+#         "标记一下",
+#         "路过留名",
+#         "收到通知了",
+#         "看看大家怎么说",
+#     ]
+#     neg = [
+#         "不认同这个说法",
+#         "太离谱了吧",
+#         "看完很失望",
+#         "逻辑不通啊",
+#         "纯属扯淡",
+#         "浪费时间",
+#         "完全没法同意",
+#         "越看越无语",
+#     ]
+#     suffixes = [
+#         "，说说我的看法",
+#         "，仅代表个人",
+#         "，希望官方回应",
+#         "，相关话题讨论很多",
+#         "，晚上再仔细看",
+#         "，转给朋友了",
+#         "，评论区好热闹",
+#         "，先记录一下观点",
+#     ]
+#     topics = ["科技", "教育", "就业", "消费", "城市", "出行", "健康", "娱乐", "体育", "财经"]
+#     pools = [pos, neu, neg]
+#     base = datetime.now() - timedelta(days=14)
+#     rows = []
+#     for i in range(n):
+#         pool = pools[i % 3]
+#         text = (
+#             f"{random.choice(pool)}{random.choice(suffixes)}"
+#             f"。关于{random.choice(topics)}第{i}条补充：样本编号{i}。"
+#         )
+#         ts = base + timedelta(hours=i // 3, minutes=i % 60)
+#         rows.append(
+#             {
+#                 "id": f"demo_{i}",
+#                 "user": f"user_{i % 200}",
+#                 "content": text,
+#                 "created_at": ts.strftime("%Y-%m-%d %H:%M:%S"),
+#                 "status_url": "demo://status",
+#                 "source": "demo",
+#             }
+#         )
+#     out.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+#     print(f"已写入演示数据 {len(rows)} 条 -> {out}")
+#     return out
+
+
+def parse_status_ids(status_url: str) -> tuple[str | None, str | None]:
+    """从 https://weibo.com/{uid}/{mblogid} 解析 uid 与 mblogid。"""
+    m = re.search(r"weibo\.com/(\d+)/([A-Za-z0-9]+)", status_url)
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
+def comments_from_build_payload(payload: dict, status_url: str) -> tuple[list[dict], int | None, int | None]:
+    """解析 buildComments 返回：只取 data 列表，避免递归把同一条算多次。"""
+    rows: list[dict] = []
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        data = []
+    for obj in data:
+        if not isinstance(obj, dict):
+            continue
+        text = obj.get("text_raw") or obj.get("text") or ""
+        cid = obj.get("id") or obj.get("idstr") or obj.get("mid")
+        if not text or not cid:
+            continue
+        u = obj.get("user") if isinstance(obj.get("user"), dict) else {}
+        user = u.get("screen_name") or u.get("name") or ""
         rows.append(
             {
-                "id": f"demo_{i}",
-                "user": f"user_{i % 200}",
-                "content": text,
-                "created_at": ts.strftime("%Y-%m-%d %H:%M:%S"),
-                "status_url": "demo://status",
-                "source": "demo",
+                "id": str(cid),
+                "user": user,
+                "content": re.sub(r"<[^>]+>", "", str(text)).strip(),
+                "created_at": str(obj.get("created_at") or ""),
+                "status_url": status_url,
+                "source": "weibo_api",
             }
         )
-    out.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
-    print(f"已写入演示数据 {len(rows)} 条 -> {out}")
-    return out
+    max_id = payload.get("max_id") if isinstance(payload, dict) else None
+    total = payload.get("total_number") if isinstance(payload, dict) else None
+    try:
+        max_id_i = int(max_id) if max_id is not None else None
+    except (TypeError, ValueError):
+        max_id_i = None
+    try:
+        total_i = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total_i = None
+    return rows, max_id_i, total_i
 
 
-def extract_comments_from_payload(payload: dict | list, status_url: str) -> list[dict]:
-    rows: list[dict] = []
-
-    def walk(obj):
-        if isinstance(obj, dict):
-            # 常见字段：text_raw / text / content
-            text = obj.get("text_raw") or obj.get("text") or obj.get("content")
-            cid = obj.get("id") or obj.get("idstr") or obj.get("mid")
-            user = None
-            u = obj.get("user")
-            if isinstance(u, dict):
-                user = u.get("screen_name") or u.get("name")
-            created = obj.get("created_at") or obj.get("createdAt")
-            if text and cid:
-                # 去掉简单 HTML
-                clean = re.sub(r"<[^>]+>", "", str(text))
-                rows.append(
-                    {
-                        "id": str(cid),
-                        "user": user or "",
-                        "content": clean.strip(),
-                        "created_at": created or "",
-                        "status_url": status_url,
-                        "source": "weibo_ajax",
-                    }
-                )
-            for v in obj.values():
-                walk(v)
-        elif isinstance(obj, list):
-            for x in obj:
-                walk(x)
-
-    walk(payload)
-    return rows
-
-
-def crawl_status(status_url: str, cookie: str, max_comments: int, pause: float) -> Path:
+def crawl_status(
+    status_url: str,
+    cookie: str,
+    max_comments: int,
+    pause: float,
+    *,
+    reset_seen: bool = False,
+    headed: bool = False,
+    flow: int = 1,
+) -> Path:
+    """用评论接口 max_id 翻页采集。"""
     from playwright.sync_api import sync_playwright
+    from urllib.parse import urlencode
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = RAW_DIR / f"comments_{stamp}.jsonl"
+    if reset_seen and SEEN_PATH.exists():
+        SEEN_PATH.unlink()
+        print("已清空 _seen_ids.json")
     seen = load_seen()
+    print(f"当前已记录 seen={len(seen)} 条（重复 ID 会跳过）")
     collected: list[dict] = []
 
+    uid, mblogid = parse_status_ids(status_url)
+    if not mblogid:
+        raise SystemExit(f"无法从 URL 解析博文 ID，请使用类似 https://weibo.com/uid/mblogid 的链接: {status_url}")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        browser = None
+        last_err: Exception | None = None
+        for launch_kwargs in (
+            {"channel": "chrome", "headless": not headed},
+            {"channel": "msedge", "headless": not headed},
+            {"headless": not headed},
+        ):
+            try:
+                browser = p.chromium.launch(**launch_kwargs)
+                print("浏览器启动方式:", launch_kwargs)
+                break
+            except Exception as e:
+                last_err = e
+        if browser is None:
+            raise RuntimeError(
+                "无法启动浏览器。请安装 Chrome/Edge，或清理磁盘后执行: "
+                "python -m playwright install chromium"
+            ) from last_err
+
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            ),
+            locale="zh-CN",
+            viewport={"width": 1400, "height": 900},
+        )
         context.add_cookies(parse_cookie_header(cookie))
         page = context.new_page()
-
-        def on_response(resp):
-            try:
-                url = resp.url
-                if "comment" not in url.lower() and "buildComments" not in url:
-                    return
-                if "application/json" not in (resp.headers.get("content-type") or ""):
-                    return
-                data = resp.json()
-                for row in extract_comments_from_payload(data, status_url):
-                    if row["id"] in seen:
-                        continue
-                    if not row["content"]:
-                        continue
-                    seen.add(row["id"])
-                    collected.append(row)
-            except Exception:
-                return
-
-        page.on("response", on_response)
+        # 先打开一次页面，带上站点上下文（部分接口会校验 referer）
         print("打开:", status_url)
         page.goto(status_url, wait_until="domcontentloaded", timeout=60000)
         time.sleep(2)
 
-        # 滚动加载更多评论
-        idle_rounds = 0
-        while len(collected) < max_comments and idle_rounds < 8:
-            before = len(collected)
-            page.mouse.wheel(0, 4000)
-            # 尝试点击「查看更多评论」类按钮
-            for text in ("查看更多", "更多评论", "加载更多"):
-                try:
-                    btn = page.get_by_text(text, exact=False).first
-                    if btn.is_visible():
-                        btn.click(timeout=1000)
-                except Exception:
-                    pass
-            time.sleep(pause)
-            if len(collected) == before:
-                idle_rounds += 1
-            else:
-                idle_rounds = 0
-            print(f"已收集 {len(collected)} / {max_comments}")
+        # 1) show 接口拿数字 mid / uid
+        show = context.request.get(
+            f"https://weibo.com/ajax/statuses/show?id={mblogid}",
+            headers={"referer": status_url},
+        )
+        if not show.ok:
+            browser.close()
+            raise RuntimeError(f"获取博文信息失败 HTTP {show.status}，Cookie 可能失效或需验证码。")
+        show_json = show.json()
+        mid = str(show_json.get("id") or show_json.get("mid") or show_json.get("idstr") or "")
+        if not uid:
+            user = show_json.get("user") if isinstance(show_json.get("user"), dict) else {}
+            uid = str(user.get("id") or user.get("idstr") or "")
+        if not mid or not uid:
+            browser.close()
+            raise RuntimeError(f"无法解析 mid/uid。show 返回键: {list(show_json)[:20]}")
+        print(f"博文 mid={mid} uid={uid} mblogid={mblogid}")
+        total_hint = show_json.get("comments_count") or show_json.get("comment_count")
+        if total_hint is not None:
+            print(f"页面显示评论数约: {total_hint}（接口可翻页部分，楼中楼另算）")
 
-        # DOM 兜底：抓可见评论文本（无稳定 id 时用 hash）
-        if len(collected) < min(20, max_comments):
-            try:
-                texts = page.locator("[class*='comment'] , [class*='Comment']").all_inner_texts()
-                for i, t in enumerate(texts):
-                    t = re.sub(r"\s+", " ", t).strip()
-                    if len(t) < 2:
-                        continue
-                    cid = f"dom_{hash(t) & 0xFFFFFFFF}"
-                    if cid in seen:
-                        continue
-                    seen.add(cid)
-                    collected.append(
-                        {
-                            "id": cid,
-                            "user": "",
-                            "content": t[:500],
-                            "created_at": "",
-                            "status_url": status_url,
-                            "source": "weibo_dom",
-                        }
-                    )
-                    if len(collected) >= max_comments:
-                        break
-            except Exception as e:
-                print("DOM 兜底失败:", e)
+        # 2) buildComments + max_id 翻页（flow=1 按时间，通常比热门更全）
+        max_id = 0
+        page_i = 0
+        stagnant = 0
+        while len(collected) < max_comments and stagnant < 3:
+            page_i += 1
+            params = {
+                "flow": flow,
+                "is_reload": 1,
+                "id": mid,
+                "is_show_bulletin": 2,
+                "is_mix": 1 if max_id else 0,
+                "count": 20,
+                "uid": uid,
+                "fetch_level": 0,
+                "locale": "zh-CN",
+            }
+            if max_id:
+                params["max_id"] = max_id
+            api = "https://weibo.com/ajax/statuses/buildComments?" + urlencode(params)
+            resp = context.request.get(api, headers={"referer": status_url})
+            if not resp.ok:
+                print(f"第 {page_i} 页失败 HTTP {resp.status}")
+                break
+            payload = resp.json()
+            rows, next_max_id, total_number = comments_from_build_payload(payload, status_url)
+            if page_i == 1 and total_number is not None:
+                print(f"接口 total_number≈{total_number}")
+
+            before = len(collected)
+            for row in rows:
+                if row["id"] in seen:
+                    continue
+                if not row["content"]:
+                    continue
+                seen.add(row["id"])
+                collected.append(row)
+                if len(collected) >= max_comments:
+                    break
+            gained = len(collected) - before
+            print(
+                f"翻页 {page_i}: 本页{len(rows)}条 新增{gained} 累计{len(collected)}/{max_comments} "
+                f"next_max_id={next_max_id}"
+            )
+
+            if next_max_id is None or next_max_id == 0:
+                print("接口返回 max_id=0，分页结束")
+                break
+            if gained == 0:
+                stagnant += 1
+            else:
+                stagnant = 0
+            max_id = next_max_id
+            time.sleep(pause)
 
         browser.close()
 
     collected = collected[:max_comments]
     if not collected:
         raise RuntimeError(
-            "未抓到评论。请检查：1) WEIBO_COOKIE 是否有效 2) 链接是否可打开评论 3) 是否触发验证码。"
-            "也可先用 --demo 跑通后续流程。"
+            "未抓到新评论。可换博文、检查 Cookie，或加 --reset-seen / --headed。"
         )
     append_jsonl(out, collected)
     save_seen(seen)
@@ -275,24 +340,39 @@ def crawl_status(status_url: str, cookie: str, max_comments: int, pause: float) 
 def main():
     load_dotenv(PROJECT_ROOT / ".env")
     parser = argparse.ArgumentParser(description="爬取微博评论")
-    parser.add_argument("--demo", action="store_true", help="写入本地演示数据，不访问微博")
-    parser.add_argument("--demo-n", type=int, default=1200, help="演示条数")
-    parser.add_argument("--status-url", type=str, default="", help="微博博文页 URL")
+    # parser.add_argument("--demo", action="store_true", help="写入本地演示数据，不访问微博")
+    # parser.add_argument("--demo-n", type=int, default=1200, help="演示条数")
+    parser.add_argument("--status-url", type=str, required=True, help="微博博文页 URL")
     parser.add_argument("--max-comments", type=int, default=500)
-    parser.add_argument("--pause", type=float, default=1.2, help="滚动间隔秒")
+    parser.add_argument("--pause", type=float, default=1.2, help="翻页间隔秒")
+    parser.add_argument("--reset-seen", action="store_true", help="清空已抓 ID 去重文件后重跑")
+    parser.add_argument("--headed", action="store_true", help="有界面模式，便于看是否跳登录/验证码")
+    parser.add_argument(
+        "--flow",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="0=按热度 1=按时间（默认，通常更全）",
+    )
     args = parser.parse_args()
 
-    if args.demo:
-        write_demo(args.demo_n)
-        return
+    # if args.demo:
+    #     write_demo(args.demo_n)
+    #     return
 
     cookie = os.getenv("WEIBO_COOKIE", "").strip()
     if not cookie:
-        raise SystemExit("未设置 WEIBO_COOKIE。请复制 .env.example 为 .env 并填入 Cookie，或使用 --demo。")
-    if not args.status_url:
-        raise SystemExit("请提供 --status-url，或使用 --demo。")
+        raise SystemExit("未设置 WEIBO_COOKIE。请复制 .env.example 为 .env 并填入 Cookie。")
 
-    crawl_status(args.status_url, cookie, args.max_comments, args.pause)
+    crawl_status(
+        args.status_url,
+        cookie,
+        args.max_comments,
+        args.pause,
+        reset_seen=args.reset_seen,
+        headed=args.headed,
+        flow=args.flow,
+    )
 
 
 if __name__ == "__main__":

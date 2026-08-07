@@ -30,9 +30,13 @@ outputs/
 
 # Large vision datasets / checkpoints (keep locally)
 Classify Leaves/data/
+transform/NER/data/
+weibo-sentiment/data/
 **/checkpoints/
 *.pth
 *.pt
+*.bin
+*.safetensors
 
 # OS
 .DS_Store
