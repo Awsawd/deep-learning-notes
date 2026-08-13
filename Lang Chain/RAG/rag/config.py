@@ -21,5 +21,8 @@ KNOWLEDGE_BASE_PATH = Path(
 if not KNOWLEDGE_BASE_PATH.is_absolute():
     KNOWLEDGE_BASE_PATH = (ROOT / KNOWLEDGE_BASE_PATH).resolve()
 
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
+
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")

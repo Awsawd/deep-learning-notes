@@ -13,14 +13,13 @@ SYSTEM = (
 def build_prompt(question: str, docs: list) -> str:
     """把 TopK 文档拼成带上下文的用户消息。"""
     shangxiawen = "\n\n".join([doc.page_content for doc in docs])
+    sources = [doc.metadata.get("source") for doc in docs]
     return f"""
-    上下文：
-    {shangxiawen}
-    
+    上下文：{shangxiawen}
+    来源：{sources}
     问题：{question}
     """
-
-
+    
 def ask(question: str, *, k: int = 4) -> str:
     """similarity_search → build_prompt → init_chat_model(DeepSeek) → invoke。"""
     emb = get_embeddings()

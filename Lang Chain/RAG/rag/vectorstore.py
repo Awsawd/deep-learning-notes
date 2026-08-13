@@ -1,32 +1,50 @@
-"""Milvus 向量库：建表 / 写入 / 连接已有 collection。"""
-from rag.embeddings import get_embeddings
-from langchain_milvus import Milvus
-from rag import config
-from rag.loader import load_and_split
+"""Milvus 向量库：建表 / 写入 / 连接 / 按 source 删除。"""
+from __future__ import annotations
 
-def build_or_get_vectorstore(embeddings, documents=None):
-    """documents 非空则入库；否则只连接已有 collection 供检索。"""
-    connection_url = config.MILVUS_URL
+import json
+
+from langchain_core.documents import Document
+from langchain_milvus import Milvus
+
+from rag import config
+
+
+def build_or_get_vectorstore(embeddings, documents: list[Document] | None = None):
+    """documents 非空则全量重建入库；否则只连接已有 collection。"""
+    connection_args = {"uri": config.MILVUS_URL}
     collection_name = config.COLLECTION_NAME
-    # 若集合已存在且要重新入库：可先 drop 再写，或换个 collection 名（自己定策略）
+
     if documents:
-        vectorstore = Milvus.from_documents(
-            drop_old=True,
+        return Milvus.from_documents(
             documents=documents,
             embedding=embeddings,
-            connection_args={"uri": connection_url},
+            connection_args=connection_args,
             collection_name=collection_name,
+            drop_old=True,
         )
-    else:
-        vectorstore = Milvus(
-            embedding_function=embeddings,
-            connection_args={"uri": connection_url},
-            collection_name=collection_name,
-        )
-    return vectorstore
+
+    return Milvus(
+        embedding_function=embeddings,
+        connection_args=connection_args,
+        collection_name=collection_name,
+    )
+
+
+def delete_by_source(vs: Milvus, source: str) -> None:
+    """按 metadata.source 删除该文件对应的全部向量。"""
+    # json.dumps 正确转义 Windows 路径中的反斜杠与引号
+    expr = f"source == {json.dumps(source, ensure_ascii=False)}"
+    try:
+        vs.delete(expr=expr)
+    except Exception as exc:  # noqa: BLE001 — 新文件或字段尚未建立时允许跳过
+        print(f"delete_by_source skip ({source}): {exc}")
+
 
 if __name__ == "__main__":
+    from rag.embeddings import get_embeddings
+    from rag.loader import load_and_split
+
     emb = get_embeddings()
     chunks = load_and_split(config.KNOWLEDGE_BASE_PATH)
     vs = build_or_get_vectorstore(emb, chunks)
-    print(vs.similarity_search("Docker", k = 2))
+    print(vs.similarity_search("Docker", k=2))
